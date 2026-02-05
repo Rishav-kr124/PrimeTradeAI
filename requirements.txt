@@ -1,5 +1,5 @@
 streamlit
-yfinance
+yfinance --upgrade
 pandas
 pandas_ta
 google-generativeai
