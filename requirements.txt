@@ -5,3 +5,5 @@ pandas_ta
 google-generativeai
 plotly
 feedparser
+pytz
+scipy
