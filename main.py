@@ -3,211 +3,370 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import google.generativeai as genai
-import plotly.graph_objects as go
-import feedparser  # <--- NEW: Added for News
-import urllib.parse
-from datetime import datetime, time
+import feedparser
 import pytz
+import concurrent.futures
+import datetime as dt   
+import time             
+import numpy as np
+from scipy.signal import argrelextrema # For finding peaks
+from datetime import datetime
 
-# --- ARCHITECTURAL CONFIGURATION ---
+# --- LAYER 1: SECURITY & CONFIGURATION ---
 st.set_page_config(
-    page_title="Prime Trade AI | Pro Terminal",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Prime Trade AI | Ultra Terminal",
+    page_icon="🦅",
+    layout="wide"
 )
 
-# Constants
-NIFTY_50_SYMBOLS = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "SBIN.NS",
-    "BHARTIARTL.NS", "ITC.NS", "L&T.NS", "KOTAKBANK.NS", "AXISBANK.NS", "HCLTECH.NS",
-    "ULTRACEMCO.NS", "ASIANPAINT.NS", "TITAN.NS", "MARUTI.NS", "TATASTEEL.NS", "BAJFINANCE.NS",
-    "SUNPHARMA.NS", "M&M.NS" 
-]
-
-# --- LAYER 1: SECURITY & SETUP ---
+# 1. SETUP AI (Using Stable Model)
 def configure_ai():
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
+        # 👇 PASTE YOUR KEY HERE. SECURITY WARNING: Keep this secret!
+        api_key = "AIzaSyAaqeCm8Dvm43k5nUWYMKzk76-suqQf4hU" 
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-flash-latest')
+        return genai.GenerativeModel('gemini-2.5-flash')
     except Exception as e:
-        st.error("🚨 API Key Missing! Please set GEMINI_API_KEY in Streamlit Secrets.")
-        st.stop()
+        return None
 
 model = configure_ai()
 
-# --- LAYER 2: UTILITY SERVICES ---
+# 2. STOCK UNIVERSE
+LIQUID_STOCKS = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "SBIN.NS", "BHARTIARTL.NS", 
+    "ITC.NS", "L&T.NS", "KOTAKBANK.NS", "AXISBANK.NS", "HCLTECH.NS", "ULTRACEMCO.NS", "ASIANPAINT.NS", 
+    "TITAN.NS", "MARUTI.NS", "TATASTEEL.NS", "BAJFINANCE.NS", "SUNPHARMA.NS", "M&M.NS", "ADANIENT.NS",
+    "ADANIPORTS.NS", "APOLLOHOSP.NS", "BAJAJFINSV.NS", "BAJAJ-AUTO.NS", "BPCL.NS", "BRITANNIA.NS",
+    "CIPLA.NS", "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS", "GRASIM.NS", "HDFCLIFE.NS",
+    "HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "INDUSINDBK.NS", "JSWSTEEL.NS", "NESTLEIND.NS",
+    "NTPC.NS", "ONGC.NS", "POWERGRID.NS", "TATACONSUM.NS", "TATAMOTORS.NS", "TECHM.NS", "UPL.NS", 
+    "WIPRO.NS", "ZOMATO.NS", "DLF.NS", "HAL.NS", "VBL.NS", "JIOFIN.NS", "DMART.NS", "SIEMENS.NS",
+    "TRENT.NS", "BEL.NS", "PFC.NS", "REC.NS", "IOC.NS", "GAIL.NS", "BANKBARODA.NS", "PNB.NS",
+    "CHOLAFIN.NS", "SHRIRAMFIN.NS", "TVSMOTOR.NS", "GODREJCP.NS", "HAVELLS.NS", "ABB.NS", "INDIGO.NS",
+    "LTIM.NS", "PIDILITIND.NS", "VEDL.NS", "AMBUJACEM.NS", "CANBK.NS", "NAUKRI.NS", "SBILIFE.NS"
+]
+
+# --- LAYER 2: HELPER FUNCTIONS ---
+
+def get_live_news(ticker):
+    """Fetches top 3 news headlines"""
+    clean_ticker = ticker.replace(".NS", "")
+    rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock+india&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        feed = feedparser.parse(rss_url)
+        headlines = []
+        for entry in feed.entries[:3]:
+            headlines.append(f"- {entry.title}")
+        return "\n".join(headlines) if headlines else "No significant news found."
+    except:
+        return "News unavailable."
+
 class MarketTimer:
-    """Determines if the Indian Market is currently Open or Closed."""
     @staticmethod
     def get_status():
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
-        market_open = time(9, 15)
-        market_close = time(15, 30)
-        
-        is_weekday = now.weekday() < 5
-        is_open_time = market_open <= now.time() <= market_close
-        
-        if is_weekday and is_open_time:
-            return "OPEN", "🔴 LIVE MARKET", now
+        IST = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(IST)
+        market_open = dt.time(9, 15)
+        market_close = dt.time(15, 30)
+        current_time_only = now.time()
+
+        if market_open <= current_time_only <= market_close:
+            if now.weekday() >= 5: return "CLOSED", "🔴 Closed (Weekend)", now
+            return "OPEN", "🟢 Market Open", now
         else:
-            return "CLOSED", "🌙 AFTER HOURS / PRE-MARKET", now
+            return "CLOSED", "🔴 Market Closed", now
 
-class DataService:
-    """Handles Data Fetching (Prices + Global Cues)."""
+# --- LAYER 3: PATTERN RECOGNITION ENGINE ---
+class PatternEngine:
     @staticmethod
-    def get_global_cues():
-        tickers = {"^GSPC": "S&P 500 (US)", "^IXIC": "NASDAQ (Tech)", "^NSEI": "NIFTY 50"}
-        data = []
-        for symbol, name in tickers.items():
-            try:
-                stock = yf.Ticker(symbol)
-                hist = stock.history(period="2d")
-                if len(hist) >= 2:
-                    close = hist['Close'].iloc[-1]
-                    prev_close = hist['Close'].iloc[-2]
-                    change = ((close - prev_close) / prev_close) * 100
-                    data.append({"Index": name, "Price": close, "Change %": change})
-            except:
-                continue
-        return pd.DataFrame(data)
-
-    @staticmethod
-    def get_stock_data(ticker, period="1y", interval="1d"):
+    def detect_pattern(df):
+        """Uses Math to find Head & Shoulders, Double Tops, etc."""
         try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period=period, interval=interval)
-            return df, stock.info
-        except:
-            return None, None
-
-class NewsService:
-    """NEW CLASS: Fetches Google News RSS for the stock."""
-    @staticmethod
-    def get_latest_news(ticker):
-        # Remove .NS to search properly (e.g., "RELIANCE" instead of "RELIANCE.NS")
-        clean_ticker = ticker.replace(".NS", "").replace(".BO", "")
-        encoded_ticker = urllib.parse.quote(clean_ticker)
-        
-        # Google News RSS URL for India (English)
-        rss_url = f"https://news.google.com/rss/search?q={encoded_ticker}+stock+news&hl=en-IN&gl=IN&ceid=IN:en"
-        
-        try:
-            feed = feedparser.parse(rss_url)
-            headlines = []
-            # Get top 5 headlines
-            for entry in feed.entries[:5]:
-                headlines.append(f"- {entry.title} (Source: {entry.source.title})")
+            highs = df['High'].values
+            lows = df['Low'].values
             
-            return "\n".join(headlines) if headlines else "No specific news found recently."
+            peak_idx = argrelextrema(highs, np.greater, order=5)[0]
+            trough_idx = argrelextrema(lows, np.less, order=5)[0]
+            
+            if len(peak_idx) < 3 or len(trough_idx) < 3:
+                return "Consolidation (No clear pattern)"
+
+            last_peaks = highs[peak_idx][-3:]
+            last_troughs = lows[trough_idx][-3:]
+            
+            p1, p2, p3 = last_peaks[-3], last_peaks[-2], last_peaks[-1]
+            t1, t2, t3 = last_troughs[-3], last_troughs[-2], last_troughs[-1]
+
+            if abs(p3 - p2) <= (p3 * 0.01) and p3 > p1:
+                return "🛑 DOUBLE TOP DETECTED (Bearish Reversal)"
+            if abs(t3 - t2) <= (t3 * 0.01) and t3 < t1:
+                return "🚀 DOUBLE BOTTOM DETECTED (Bullish Reversal)"
+            if p2 > p1 and p2 > p3 and abs(p1 - p3) < (p1 * 0.02):
+                return "📉 HEAD & SHOULDERS (Strong Sell)"
+            if t2 < t1 and t2 < t3 and abs(t1 - t3) < (t1 * 0.02):
+                return "📈 INV. HEAD & SHOULDERS (Strong Buy)"
+            if p3 > p2 > p1:
+                return "✅ Higher Highs (Strong Uptrend)"
+            if p3 < p2 < p1:
+                return "⚠️ Lower Highs (Strong Downtrend)"
+
+            return "Sideways / Choppy"
         except:
-            return "Could not fetch news."
+            return "Insufficient Data for Patterns"
 
-# --- LAYER 3: ANALYSIS ENGINE ---
-class TechnicalAnalyst:
+class ScannerEngine:
     @staticmethod
-    def calculate_indicators(df):
-        if df is None or len(df) < 50:
-            return df
+    def safe_ai_request(prompt):
+        """Restores the AI connection and handles rate limits."""
+        for attempt in range(3):
+            try:
+                response = model.generate_content(prompt)
+                if response and response.text:
+                    return response
+            except Exception as e:
+                if "429" in str(e):
+                    time.sleep(10)
+                else:
+                    return None
+        return None
+
+    @staticmethod
+    def analyze_stock_logic(ticker, mode):
+        """The core logic that filters stocks based on the selected mode."""
+        try:
+            period = "1y" if mode in ["INTRADAY", "SHORT", "SWING"] else "1mo"
+            
+            # 🛠️ THE FIX: Use yf.Ticker().history() instead of yf.download()
+            # This is 100% thread-safe and prevents data mixing!
+            stock = yf.Ticker(ticker)
+            df = stock.history(period=period)
+            
+            if df is None or df.empty: 
+                return None
+
+            # Need at least 200 days to calculate 200 EMA
+            if len(df) < 200 and mode in ["INTRADAY", "SHORT"]:
+                return None
+
+            # 🧹 No more messy MultiIndex column code needed! .history() is clean.
+            curr_price = float(df['Close'].iloc[-1])
+            open_p = float(df['Open'].iloc[-1])
+            high_p = float(df['High'].iloc[-1])
+            low_p = float(df['Low'].iloc[-1])
+            vol = int(df['Volume'].iloc[-1])
+            avg_vol = int(df['Volume'].tail(10).mean())
+
+            if mode == "INTRADAY":
+                ema_200 = ta.ema(df['Close'], length=200).iloc[-1]
+                if (open_p <= low_p * 1.01) and (curr_price > ema_200) and (vol > avg_vol * 1.05):
+                    return {"Ticker": ticker, "Price": round(curr_price, 2), "Type": "🔥 Intraday Buy"}
+            
+            elif mode == "BTST":
+                prev_close = float(df['Close'].iloc[-2])
+                if (curr_price > prev_close * 1.01) and (vol >= avg_vol * 0.9):
+                    return {"Ticker": ticker, "Price": round(curr_price, 2), "Type": "🌙 BTST"}
+            
+            elif mode == "SHORT":
+                ema_200 = ta.ema(df['Close'], length=200).iloc[-1]
+                if (open_p >= high_p * 0.99) and (curr_price < ema_200) and (vol > avg_vol * 1.05):
+                    return {"Ticker": ticker, "Price": round(curr_price, 2), "Type": "🩸 Short Sell"}
+
+            elif mode == "SWING":
+                ema_50 = ta.ema(df['Close'], length=50).iloc[-1]
+                rsi = ta.rsi(df['Close'], length=14).iloc[-1]
+                if (curr_price > ema_50) and (rsi > 50) and (vol > avg_vol):
+                    return {"Ticker": ticker, "Price": round(curr_price, 2), "Type": "📈 Swing Trade"}
+
+            return None
+        except Exception as e:
+            return None
+
+    @staticmethod
+    def scan_market(stock_list, mode="INTRADAY"):
+        results = []
+        progress_bar = st.progress(0, text=f"⚡ Scanning for {mode} setups...")
         
-        df['SMA_50'] = ta.sma(df['Close'], length=50)
-        df['SMA_200'] = ta.sma(df['Close'], length=200)
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-        macd = ta.macd(df['Close'])
-        df = pd.concat([df, macd], axis=1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_stock = {executor.submit(ScannerEngine.analyze_stock_logic, s, mode): s for s in stock_list}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_stock)):
+                data = future.result()
+                if data:
+                    results.append(data)
+                progress_bar.progress((i + 1) / len(stock_list))
         
-        return df.dropna().tail(1)
+        progress_bar.empty()
+        return pd.DataFrame(results)
+# --- LAYER 4: NIFTY OPTIONS ANALYZER (NEW) ---
+def run_nifty_analysis():
+    st.info("🦅 Analyzing Nifty 50 for Call/Put Levels...")
+    try:
+        df = yf.download("^NSEI", period="1mo", interval="15m", progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        current_price = float(df['Close'].iloc[-1])
+        highs = df['High'].tail(50).values
+        lows = df['Low'].tail(50).values
+        
+        # Simple Support/Resistance based on recent extremes
+        resistance = round(np.max(highs), 2)
+        support = round(np.min(lows), 2)
+        rsi = round(ta.rsi(df['Close'], length=14).iloc[-1], 2)
 
-# --- LAYER 4: PRESENTATION & AI CORE ---
-def render_dashboard():
-    status, status_label, current_time = MarketTimer.get_status()
-    
-    st.title("🚀 Prime Trade AI")
-    st.markdown(f"**Status:** {status_label} | **Time:** {current_time.strftime('%Y-%m-%d %H:%M:%S IST')}")
-    
-    # Global Cues
-    st.subheader("🌍 Global Market Sentiment")
-    global_df = DataService.get_global_cues()
-    if not global_df.empty:
-        cols = st.columns(len(global_df))
-        for index, row in global_df.iterrows():
-            cols[index].metric(label=row['Index'], value=f"{row['Price']:.2f}", delta=f"{row['Change %']:.2f}%")
-    st.divider()
-
-    # Inputs
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.info("🔎 **Search Any Stock**")
-        search_input = st.text_input("Enter Symbol (e.g., ZOMATO.NS):").upper()
-    with col2:
-        st.success("📊 **Quick Select (Nifty 50)**")
-        quick_select = st.selectbox("Or choose:", ["Select..."] + NIFTY_50_SYMBOLS)
-
-    target_stock = search_input if search_input else (quick_select if quick_select != "Select..." else None)
-
-    if target_stock:
-        if not target_stock.endswith((".NS", ".BO")):
-             st.warning("⚠️ Add .NS or .BO (e.g., TATASTEEL.NS)")
+        prompt = f"""
+        Act as an expert F&O derivatives analyst. 
+        Nifty 50 Current Price: {current_price}
+        Immediate Resistance: {resistance}
+        Immediate Support: {support}
+        15-Min RSI: {rsi}
+        
+        Provide a very quick, actionable view for today:
+        1. When to buy a CALL option (Above what level? Target? Stop Loss?)
+        2. When to buy a PUT option (Below what level? Target? Stop Loss?)
+        3. Overall Market Sentiment right now.
+        Format cleanly with emojis.
+        """
+        response = ScannerEngine.safe_ai_request(prompt)
+        if response:
+            st.success("✅ Nifty Call/Put Analysis Ready")
+            st.markdown(response.text)
         else:
-            run_analysis(target_stock, status)
+            st.error("AI Busy. Try again.")
+    except Exception as e:
+        st.error(f"Could not load Nifty data: {e}")
 
-def run_analysis(ticker, market_status):
-    st.divider()
-    st.header(f"📉 Deep Analysis: {ticker}")
+# --- LAYER 5: ADVANCED ANALYSIS ENGINE ---
+def run_advanced_analysis(ticker):
+    st.info(f"🦅 Ultra-Analyst is scanning {ticker}...")
     
-    with st.spinner(f"🤖 AI is reading news & charts for {ticker}..."):
-        # 1. Fetch Price Data
-        df, info = DataService.get_stock_data(ticker)
+    def safe_extract(series):
+        try:
+            if series is None or series.empty: return 0.0
+            val = series.iloc[-1]
+            if pd.isna(val): return 0.0
+            return float(val.item()) if hasattr(val, 'item') else float(val)
+        except:
+            return 0.0
+
+    try:
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
+        
         if df is None or df.empty:
-            st.error("❌ Stock not found.")
+            st.error(f"❌ ERROR: No data found for '{ticker}'.")
             return
 
-        # 2. Fetch News (NEW STEP)
-        news_summary = NewsService.get_latest_news(ticker)
-        
-        # 3. Render Chart
-        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-        fig.update_layout(height=500, title=f"{ticker} Price Action")
-        st.plotly_chart(fig, use_container_width=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            try:
+                df = df.xs(ticker, level=1, axis=1)
+            except:
+                pass 
 
-        # 4. Calculate Technicals
-        tech_data = TechnicalAnalyst.calculate_indicators(df)
-        last_price = df['Close'].iloc[-1]
+        if len(df) < 200:
+            st.error(f"⚠️ Not enough data ({len(df)} days). Need 200+ days for EMA.")
+            return
+
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        df['EMA_200'] = ta.ema(df['Close'], length=200)
         
-        # 5. The "Super Prompt" (Math + News)
-        prompt = f"""
-        You are a Senior Financial Analyst.
+        bb = ta.bbands(df['Close'], length=20)
+        if bb is not None:
+            df['BB_UPPER'] = bb[bb.columns[2]] # Fixed: Usually upper band is index 2
+        else:
+            df['BB_UPPER'] = df['Close']
         
-        **MARKET CONTEXT:**
-        - Status: {market_status}
-        - Ticker: {ticker}
-        - Current Price: {last_price}
+        current_price = safe_extract(df['Close'])
+        rsi = round(safe_extract(df['RSI']), 2)
+        ema_200 = round(safe_extract(df['EMA_200']), 2)
+        upper_band = round(safe_extract(df['BB_UPPER']), 2)
         
-        **LATEST NEWS HEADLINES (Sentiment Analysis):**
-        {news_summary}
-        
-        **TECHNICAL INDICATORS:**
-        {tech_data.to_string()}
-        
-        **TASK:**
-        Combine the News Sentiment (Positive/Negative) with the Technical Indicators (RSI, SMA).
-        If News is bad but Technicals are good, be cautious.
-        
-        **OUTPUT:**
-        1. **Verdict:** (BUY / SELL / WAIT)
-        2. **News Sentiment:** (Positive / Neutral / Negative) - Explain briefly based on headlines.
-        3. **Trade Setup:** Entry, Stop Loss, Target.
-        4. **Reasoning:** Combine news and math.
-        """
-        
-        response = model.generate_content(prompt)
-        st.markdown("### 🤖 Prime Trade Verdict")
+        chart_pattern = PatternEngine.detect_pattern(df)
+        news = get_live_news(ticker)
+
+    except Exception as e:
+        st.error(f"Data Processing Error: {e}")
+        return
+
+    # Updated Prompt to force Entry, Stoploss, Target and timeframe calculations
+    prompt = f"""
+    Act as a Senior Technical Analyst. Analyze {ticker}.
+    
+    📊 DATA:
+    - Pattern: {chart_pattern}
+    - Price: {current_price}
+    - RSI: {rsi}
+    - 200 EMA: {ema_200}
+    - Volatility Upper: {upper_band}
+    
+    📰 NEWS:
+    {news}
+    
+    🔮 MISSION:
+    1. Analyze the Technicals & News briefly.
+    2. Suggest the best timeframe for this trade (e.g., Intraday, 1-week Swing, Long-term).
+    3. MANDATORY: Give exact mathematical levels for:
+       - 🟢 ENTRY PRICE
+       - 🔴 STOP LOSS
+       - 🎯 TARGET PRICE(S)
+    4. Provide the exact risk-to-reward ratio based on your levels.
+    """
+
+    response = ScannerEngine.safe_ai_request(prompt)
+    
+    if response:
+        st.success(f"✅ Deep Analysis for {ticker}")
         st.markdown(response.text)
+    else:
+        st.error("AI Busy. Try again.")
+
+# --- LAYER 6: DASHBOARD ---
+def render_dashboard():
+    status, status_label, current_time = MarketTimer.get_status()
+    st.title("🦅 Prime Trade AI | Ultra Terminal")
+    st.markdown(f"**Status:** {status_label} | **Time:** {current_time.strftime('%H:%M:%S IST')}")
+    st.divider()
+
+    tab1, tab2, tab3 = st.tabs(["🔥 Stock Scanners", "🔎 Deep Pattern Analyzer", "📊 Nifty Options (Call/Put)"])
+    
+    with tab1:
+        st.markdown("### 🚦 Quick Market Scanners")
+        col1, col2, col3, col4 = st.columns(4)
         
-        with st.expander("Show News Source"):
-            st.write(news_summary)
+        with col1:
+            if st.button("⚡ Intraday Buy"):
+                df = ScannerEngine.scan_market(LIQUID_STOCKS, mode="INTRADAY")
+                if not df.empty: st.dataframe(df)
+                else: st.warning("No Intraday Buy setups.")
+        with col2:
+            if st.button("🩸 Short Sell"):
+                df = ScannerEngine.scan_market(LIQUID_STOCKS, mode="SHORT")
+                if not df.empty: st.dataframe(df)
+                else: st.warning("No Short Sell setups.")
+        with col3:
+            if st.button("🌙 BTST"):
+                df = ScannerEngine.scan_market(LIQUID_STOCKS, mode="BTST")
+                if not df.empty: st.dataframe(df)
+                else: st.warning("No BTST setups.")
+        with col4:
+            if st.button("📈 Swing Trades"):
+                df = ScannerEngine.scan_market(LIQUID_STOCKS, mode="SWING")
+                if not df.empty: st.dataframe(df)
+                else: st.warning("No Swing setups.")
+                
+        st.info("💡 Tip: Take the tickers from these scanners and plug them into the **Deep Pattern Analyzer** tab to get your Entry, Target, and Stop Loss calculations!")
+
+    with tab2:
+        ticker = st.text_input("Enter Symbol for Pattern Analysis (e.g., ZOMATO.NS):").upper()
+        if ticker: # Fixed the syntax error here!
+            if ticker.endswith(".NS"):
+                run_advanced_analysis(ticker)
+            else:
+                st.warning("Please add .NS")
+                
+    with tab3:
+        st.markdown("### 🦅 Nifty 50 Options Levels")
+        st.write("Get strong support/resistance levels and Call/Put recommendations based on current market data.")
+        if st.button("🔮 Analyze Nifty Levels"):
+            run_nifty_analysis()
 
 if __name__ == "__main__":
     render_dashboard()
