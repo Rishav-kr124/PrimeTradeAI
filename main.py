@@ -23,7 +23,7 @@ st.set_page_config(
 def configure_ai():
     try:
         # 👇 PASTE YOUR KEY HERE. SECURITY WARNING: Keep this secret!
-        api_key = "AIzaSyAaqeCm8Dvm43k5nUWYMKzk76-suqQf4hU" 
+         
         genai.configure(api_key=api_key)
         return genai.GenerativeModel('gemini-2.5-flash')
     except Exception as e:
