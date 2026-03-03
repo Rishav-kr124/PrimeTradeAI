@@ -19,14 +19,14 @@ st.set_page_config(
     layout="wide"
 )
 
-# 1. SETUP AI (Using Stable Model)
+# 1. SETUP AI (Using Secure Secrets)
 def configure_ai():
     try:
-        # 👇 PASTE YOUR KEY HERE. SECURITY WARNING: Keep this secret!
-         
+        api_key = st.secrets["GEMINI_API_KEY"] 
         genai.configure(api_key=api_key)
         return genai.GenerativeModel('gemini-2.5-flash')
     except Exception as e:
+        st.error("Oops! API Key not found in secrets.")
         return None
 
 model = configure_ai()
@@ -49,41 +49,41 @@ LIQUID_STOCKS = [
 # --- LAYER 2: HELPER FUNCTIONS ---
 
 def get_live_news(ticker):
-   def get_macro_data():
-       """Fetches global indices and commodity prices."""
-       symbols = {
-            "Nifty 50": "^NSEI", 
-            "Dow Jones": "^DJI", 
-            "Nasdaq": "^IXIC",
-            "Gold (Comex)": "GC=F",
-            "Silver (Comex)": "SI=F"
-        }
-        macro_data = {}
-        for name, ticker in symbols.items():
-            try:
-                stock = yf.Ticker(ticker)
-                df = stock.history(period="5d")
-                if len(df) >= 2:
-                    current = df['Close'].iloc[-1]
-                    prev = df['Close'].iloc[-2]
-                    change = ((current - prev) / prev) * 100
-                    macro_data[name] = {"price": round(current, 2), "change": round(change, 2)}
-            except:
-                macro_data[name] = {"price": 0.0, "change": 0.0}
-        return macro_data
+    """Fetches top 3 news headlines"""
+    clean_ticker = ticker.replace(".NS", "")
+    rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock+india&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        feed = feedparser.parse(rss_url)
+        headlines = []
+        for entry in feed.entries[:3]:
+            headlines.append(f"- {entry.title}")
+        return "\n".join(headlines) if headlines else "No significant news found."
+    except:
+        return "News unavailable."
 
-def get_market_sentiment(nifty_change, news_text):
-    """Uses AI to give a 2-line market condition summary."""
-    prompt = f"""
-    Act as a Stock Market Anchor. 
-    Nifty 50 changed by {nifty_change}% today.
-    Recent Headlines: {news_text}
-    
-    Give a punchy, 2-line summary of the current market condition and sentiment. 
-    Keep it strictly to 2 lines. Use emojis.
-    """
-    response = ScannerEngine.safe_ai_request(prompt)
-    return response.text if response else "Market sentiment unavailable right now."
+def get_macro_data():
+    """Fetches global indices and commodity prices."""
+    symbols = {
+        "Nifty 50": "^NSEI", 
+        "Dow Jones": "^DJI", 
+        "Nasdaq": "^IXIC",
+        "Gold (Comex)": "GC=F",
+        "Silver (Comex)": "SI=F"
+    }
+    macro_data = {}
+    for name, ticker in symbols.items():
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="5d")
+            if len(df) >= 2:
+                current = df['Close'].iloc[-1]
+                prev = df['Close'].iloc[-2]
+                change = ((current - prev) / prev) * 100
+                macro_data[name] = {"price": round(current, 2), "change": round(change, 2)}
+        except:
+            macro_data[name] = {"price": 0.0, "change": 0.0}
+    return macro_data
+
 class MarketTimer:
     @staticmethod
     def get_status():
@@ -103,7 +103,6 @@ class MarketTimer:
 class PatternEngine:
     @staticmethod
     def detect_pattern(df):
-        """Uses Math to find Head & Shoulders, Double Tops, etc."""
         try:
             highs = df['High'].values
             lows = df['Low'].values
@@ -140,9 +139,9 @@ class PatternEngine:
 class ScannerEngine:
     @staticmethod
     def safe_ai_request(prompt):
-        """Restores the AI connection and handles rate limits."""
         for attempt in range(3):
             try:
+                if model is None: return None
                 response = model.generate_content(prompt)
                 if response and response.text:
                     return response
@@ -155,23 +154,17 @@ class ScannerEngine:
 
     @staticmethod
     def analyze_stock_logic(ticker, mode):
-        """The core logic that filters stocks based on the selected mode."""
         try:
             period = "1y" if mode in ["INTRADAY", "SHORT", "SWING"] else "1mo"
-            
-            # 🛠️ THE FIX: Use yf.Ticker().history() instead of yf.download()
-            # This is 100% thread-safe and prevents data mixing!
             stock = yf.Ticker(ticker)
             df = stock.history(period=period)
             
             if df is None or df.empty: 
                 return None
 
-            # Need at least 200 days to calculate 200 EMA
             if len(df) < 200 and mode in ["INTRADAY", "SHORT"]:
                 return None
 
-            # 🧹 No more messy MultiIndex column code needed! .history() is clean.
             curr_price = float(df['Close'].iloc[-1])
             open_p = float(df['Open'].iloc[-1])
             high_p = float(df['High'].iloc[-1])
@@ -219,7 +212,20 @@ class ScannerEngine:
         
         progress_bar.empty()
         return pd.DataFrame(results)
-# --- LAYER 4: NIFTY OPTIONS ANALYZER (NEW) ---
+
+def get_market_sentiment(nifty_change, news_text):
+    prompt = f"""
+    Act as a Stock Market Anchor. 
+    Nifty 50 changed by {nifty_change}% today.
+    Recent Headlines: {news_text}
+    
+    Give a punchy, 2-line summary of the current market condition and sentiment. 
+    Keep it strictly to 2 lines. Use emojis.
+    """
+    response = ScannerEngine.safe_ai_request(prompt)
+    return response.text if response else "Market sentiment unavailable right now."
+
+# --- LAYER 4: NIFTY OPTIONS ANALYZER ---
 def run_nifty_analysis():
     st.info("🦅 Analyzing Nifty 50 for Call/Put Levels...")
     try:
@@ -231,7 +237,6 @@ def run_nifty_analysis():
         highs = df['High'].tail(50).values
         lows = df['Low'].tail(50).values
         
-        # Simple Support/Resistance based on recent extremes
         resistance = round(np.max(highs), 2)
         support = round(np.min(lows), 2)
         rsi = round(ta.rsi(df['Close'], length=14).iloc[-1], 2)
@@ -293,7 +298,7 @@ def run_advanced_analysis(ticker):
         
         bb = ta.bbands(df['Close'], length=20)
         if bb is not None:
-            df['BB_UPPER'] = bb[bb.columns[2]] # Fixed: Usually upper band is index 2
+            df['BB_UPPER'] = bb[bb.columns[2]] 
         else:
             df['BB_UPPER'] = df['Close']
         
@@ -309,7 +314,6 @@ def run_advanced_analysis(ticker):
         st.error(f"Data Processing Error: {e}")
         return
 
-    # Updated Prompt to force Entry, Stoploss, Target and timeframe calculations
     prompt = f"""
     Act as a Senior Technical Analyst. Analyze {ticker}.
     
@@ -325,12 +329,8 @@ def run_advanced_analysis(ticker):
     
     🔮 MISSION:
     1. Analyze the Technicals & News briefly.
-    2. Suggest the best timeframe for this trade (e.g., Intraday, 1-week Swing, Long-term).
-    3. MANDATORY: Give exact mathematical levels for:
-       - 🟢 ENTRY PRICE
-       - 🔴 STOP LOSS
-       - 🎯 TARGET PRICE(S)
-    4. Provide the exact risk-to-reward ratio based on your levels.
+    2. Suggest the best timeframe for this trade.
+    3. MANDATORY: Give exact mathematical levels for ENTRY, STOP LOSS, and TARGET.
     """
 
     response = ScannerEngine.safe_ai_request(prompt)
@@ -342,7 +342,6 @@ def run_advanced_analysis(ticker):
         st.error("AI Busy. Try again.")
 
 # --- LAYER 6: DASHBOARD ---
-# --- LAYER 6: DASHBOARD ---
 def render_dashboard():
     status, status_label, current_time = MarketTimer.get_status()
     
@@ -352,7 +351,7 @@ def render_dashboard():
     st.sidebar.markdown(f"**Time:** {current_time.strftime('%H:%M:%S IST')}")
     st.sidebar.divider()
     
-    st.sidebar.subheader("🪙 Commodities (Global/MCX Proxy)")
+    st.sidebar.subheader("🪙 Commodities")
     macro = get_macro_data()
     
     if "Gold (Comex)" in macro:
@@ -361,12 +360,10 @@ def render_dashboard():
         st.sidebar.metric("Silver", f"${macro['Silver (Comex)']['price']}", f"{macro['Silver (Comex)']['change']}%")
         
     st.sidebar.divider()
-    st.sidebar.info("💡 Tip: Global commodity futures closely track Indian MCX pricing.")
 
-    # --- MAIN SCREEN: GLOBAL INDICES & SENTIMENT ---
+    # --- MAIN SCREEN ---
     st.title("Prime Trade AI | Ultra Terminal")
     
-    # Top Ticker Tape
     c1, c2, c3 = st.columns(3)
     if "Nifty 50" in macro:
         c1.metric("🇮🇳 Nifty 50", f"{macro['Nifty 50']['price']}", f"{macro['Nifty 50']['change']}%")
@@ -377,7 +374,6 @@ def render_dashboard():
         
     st.divider()
     
-    # AI Market Condition & News
     st.subheader("📰 Live Market Condition")
     nifty_change = macro.get("Nifty 50", {}).get("change", 0.0)
     general_news = get_live_news("NIFTY 50") 
@@ -391,8 +387,7 @@ def render_dashboard():
 
     st.divider()
 
-    # --- YOUR TABS (RESTORED!) ---
-    tab1, tab2, tab3 = st.tabs(["🔥 Stock Scanners", "🔎 Deep Pattern Analyzer", "📊 Nifty Options (Call/Put)"])
+    tab1, tab2, tab3 = st.tabs(["🔥 Stock Scanners", "🔎 Deep Pattern Analyzer", "📊 Nifty Options"])
     
     with tab1:
         st.markdown("### 🚦 Quick Market Scanners")
@@ -418,8 +413,6 @@ def render_dashboard():
                 df = ScannerEngine.scan_market(LIQUID_STOCKS, mode="SWING")
                 if not df.empty: st.dataframe(df)
                 else: st.warning("No Swing setups.")
-                
-        st.info("💡 Tip: Take the tickers from these scanners and plug them into the **Deep Pattern Analyzer** tab to get your Entry, Target, and Stop Loss calculations!")
 
     with tab2:
         ticker = st.text_input("Enter Symbol for Pattern Analysis (e.g., ZOMATO.NS):").upper()
@@ -431,7 +424,6 @@ def render_dashboard():
                 
     with tab3:
         st.markdown("### 🦅 Nifty 50 Options Levels")
-        st.write("Get strong support/resistance levels and Call/Put recommendations based on current market data.")
         if st.button("🔮 Analyze Nifty Levels"):
             run_nifty_analysis()
 
