@@ -49,6 +49,41 @@ LIQUID_STOCKS = [
 # --- LAYER 2: HELPER FUNCTIONS ---
 
 def get_live_news(ticker):
+    def get_macro_data():
+    """Fetches global indices and commodity prices."""
+    symbols = {
+        "Nifty 50": "^NSEI", 
+        "Dow Jones": "^DJI", 
+        "Nasdaq": "^IXIC",
+        "Gold (Comex)": "GC=F",
+        "Silver (Comex)": "SI=F"
+    }
+    macro_data = {}
+    for name, ticker in symbols.items():
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="5d")
+            if len(df) >= 2:
+                current = df['Close'].iloc[-1]
+                prev = df['Close'].iloc[-2]
+                change = ((current - prev) / prev) * 100
+                macro_data[name] = {"price": round(current, 2), "change": round(change, 2)}
+        except:
+            macro_data[name] = {"price": 0.0, "change": 0.0}
+    return macro_data
+
+def get_market_sentiment(nifty_change, news_text):
+    """Uses AI to give a 2-line market condition summary."""
+    prompt = f"""
+    Act as a Stock Market Anchor. 
+    Nifty 50 changed by {nifty_change}% today.
+    Recent Headlines: {news_text}
+    
+    Give a punchy, 2-line summary of the current market condition and sentiment. 
+    Keep it strictly to 2 lines. Use emojis.
+    """
+    response = ScannerEngine.safe_ai_request(prompt)
+    return response.text if response else "Market sentiment unavailable right now."
     """Fetches top 3 news headlines"""
     clean_ticker = ticker.replace(".NS", "")
     rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock+india&hl=en-IN&gl=IN&ceid=IN:en"
@@ -319,12 +354,56 @@ def run_advanced_analysis(ticker):
         st.error("AI Busy. Try again.")
 
 # --- LAYER 6: DASHBOARD ---
+# --- LAYER 6: DASHBOARD ---
 def render_dashboard():
     status, status_label, current_time = MarketTimer.get_status()
-    st.title("🦅 Prime Trade AI | Ultra Terminal")
-    st.markdown(f"**Status:** {status_label} | **Time:** {current_time.strftime('%H:%M:%S IST')}")
+    
+    # --- SIDEBAR: COMMODITIES ---
+    st.sidebar.title("🦅 Prime Trade AI")
+    st.sidebar.markdown(f"**Status:** {status_label}")
+    st.sidebar.markdown(f"**Time:** {current_time.strftime('%H:%M:%S IST')}")
+    st.sidebar.divider()
+    
+    st.sidebar.subheader("🪙 Commodities (Global/MCX Proxy)")
+    macro = get_macro_data()
+    
+    if "Gold (Comex)" in macro:
+        st.sidebar.metric("Gold", f"${macro['Gold (Comex)']['price']}", f"{macro['Gold (Comex)']['change']}%")
+    if "Silver (Comex)" in macro:
+        st.sidebar.metric("Silver", f"${macro['Silver (Comex)']['price']}", f"{macro['Silver (Comex)']['change']}%")
+        
+    st.sidebar.divider()
+    st.sidebar.info("💡 Tip: Global commodity futures closely track Indian MCX pricing.")
+
+    # --- MAIN SCREEN: GLOBAL INDICES & SENTIMENT ---
+    st.title("Prime Trade AI | Ultra Terminal")
+    
+    # Top Ticker Tape
+    c1, c2, c3 = st.columns(3)
+    if "Nifty 50" in macro:
+        c1.metric("🇮🇳 Nifty 50", f"{macro['Nifty 50']['price']}", f"{macro['Nifty 50']['change']}%")
+    if "Dow Jones" in macro:
+        c2.metric("🇺🇸 Dow Jones", f"{macro['Dow Jones']['price']}", f"{macro['Dow Jones']['change']}%")
+    if "Nasdaq" in macro:
+        c3.metric("🇺🇸 Nasdaq", f"{macro['Nasdaq']['price']}", f"{macro['Nasdaq']['change']}%")
+        
+    st.divider()
+    
+    # AI Market Condition & News
+    st.subheader("📰 Live Market Condition")
+    nifty_change = macro.get("Nifty 50", {}).get("change", 0.0)
+    general_news = get_live_news("NIFTY 50") 
+    
+    with st.spinner("Analyzing global sentiment..."):
+        market_condition = get_market_sentiment(nifty_change, general_news)
+        st.info(market_condition)
+        
+    with st.expander("View Latest Market Headlines"):
+        st.markdown(general_news)
+
     st.divider()
 
+    # --- YOUR TABS (RESTORED!) ---
     tab1, tab2, tab3 = st.tabs(["🔥 Stock Scanners", "🔎 Deep Pattern Analyzer", "📊 Nifty Options (Call/Put)"])
     
     with tab1:
@@ -356,7 +435,7 @@ def render_dashboard():
 
     with tab2:
         ticker = st.text_input("Enter Symbol for Pattern Analysis (e.g., ZOMATO.NS):").upper()
-        if ticker: # Fixed the syntax error here!
+        if ticker: 
             if ticker.endswith(".NS"):
                 run_advanced_analysis(ticker)
             else:
