@@ -50,13 +50,13 @@ LIQUID_STOCKS = [
 
 def get_live_news(ticker):
     def get_macro_data():
-    """Fetches global indices and commodity prices."""
-    symbols = {
-        "Nifty 50": "^NSEI", 
-        "Dow Jones": "^DJI", 
-        "Nasdaq": "^IXIC",
-        "Gold (Comex)": "GC=F",
-        "Silver (Comex)": "SI=F"
+        """Fetches global indices and commodity prices."""
+        symbols = {
+            "Nifty 50": "^NSEI", 
+            "Dow Jones": "^DJI", 
+            "Nasdaq": "^IXIC",
+            "Gold (Comex)": "GC=F",
+            "Silver (Comex)": "SI=F"
     }
     macro_data = {}
     for name, ticker in symbols.items():
