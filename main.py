@@ -49,28 +49,28 @@ LIQUID_STOCKS = [
 # --- LAYER 2: HELPER FUNCTIONS ---
 
 def get_live_news(ticker):
-    def get_macro_data():
-        """Fetches global indices and commodity prices."""
-        symbols = {
+   def get_macro_data():
+       """Fetches global indices and commodity prices."""
+       symbols = {
             "Nifty 50": "^NSEI", 
             "Dow Jones": "^DJI", 
             "Nasdaq": "^IXIC",
             "Gold (Comex)": "GC=F",
             "Silver (Comex)": "SI=F"
-    }
-    macro_data = {}
-    for name, ticker in symbols.items():
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="5d")
-            if len(df) >= 2:
-                current = df['Close'].iloc[-1]
-                prev = df['Close'].iloc[-2]
-                change = ((current - prev) / prev) * 100
-                macro_data[name] = {"price": round(current, 2), "change": round(change, 2)}
-        except:
-            macro_data[name] = {"price": 0.0, "change": 0.0}
-    return macro_data
+        }
+        macro_data = {}
+        for name, ticker in symbols.items():
+            try:
+                stock = yf.Ticker(ticker)
+                df = stock.history(period="5d")
+                if len(df) >= 2:
+                    current = df['Close'].iloc[-1]
+                    prev = df['Close'].iloc[-2]
+                    change = ((current - prev) / prev) * 100
+                    macro_data[name] = {"price": round(current, 2), "change": round(change, 2)}
+            except:
+                macro_data[name] = {"price": 0.0, "change": 0.0}
+        return macro_data
 
 def get_market_sentiment(nifty_change, news_text):
     """Uses AI to give a 2-line market condition summary."""
@@ -84,18 +84,6 @@ def get_market_sentiment(nifty_change, news_text):
     """
     response = ScannerEngine.safe_ai_request(prompt)
     return response.text if response else "Market sentiment unavailable right now."
-    """Fetches top 3 news headlines"""
-    clean_ticker = ticker.replace(".NS", "")
-    rss_url = f"https://news.google.com/rss/search?q={clean_ticker}+stock+india&hl=en-IN&gl=IN&ceid=IN:en"
-    try:
-        feed = feedparser.parse(rss_url)
-        headlines = []
-        for entry in feed.entries[:3]:
-            headlines.append(f"- {entry.title}")
-        return "\n".join(headlines) if headlines else "No significant news found."
-    except:
-        return "News unavailable."
-
 class MarketTimer:
     @staticmethod
     def get_status():
